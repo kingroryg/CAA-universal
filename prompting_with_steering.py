@@ -3,10 +3,13 @@ Use CAA to steer the model
 
 Usage:
 python prompting_with_steering.py --behaviors sycophancy --layers 10 --multipliers 0.1 0.5 1 2 5 10 --type ab --use_base_model --model_size 7b
+
+For newer models:
+python prompting_with_steering.py --behaviors sycophancy --layers 10 --multipliers 0.1 0.5 1 2 5 10 --type ab --model_name llama3 --model_size 8b
 """
 
 import json
-from llama_wrapper import LlamaWrapper
+from llama_wrapper import ModelWrapper
 import os
 from dotenv import load_dotenv
 import argparse
@@ -32,7 +35,7 @@ HUGGINGFACE_TOKEN = os.getenv("HF_TOKEN")
 
 def process_item_ab(
     item: Dict[str, str],
-    model: LlamaWrapper,
+    model: ModelWrapper,
     system_prompt: Optional[str],
     a_token_id: int,
     b_token_id: int,
@@ -52,46 +55,42 @@ def process_item_ab(
         "b_prob": b_prob,
     }
 
+
 def process_item_open_ended(
     item: Dict[str, str],
-    model: LlamaWrapper,
+    model: ModelWrapper,
     system_prompt: Optional[str],
     a_token_id: int,
     b_token_id: int,
 ) -> Dict[str, str]:
-    question = item["question"]
+    question: str = item["question"]
     model_output = model.generate_text(
-        user_input=question, system_prompt=system_prompt, max_new_tokens=100
+        user_input=question, system_prompt=system_prompt, max_new_tokens=500
     )
     return {
         "question": question,
-        "model_output": model_output.split(E_INST)[-1].strip(),
-        "raw_model_output": model_output,
+        "model_output": model_output,
     }
 
 
 def process_item_tqa_mmlu(
     item: Dict[str, str],
-    model: LlamaWrapper,
+    model: ModelWrapper,
     system_prompt: Optional[str],
     a_token_id: int,
     b_token_id: int,
 ) -> Dict[str, str]:
-    prompt = item["prompt"]
-    correct = item["correct"]
-    incorrect = item["incorrect"]
-    category = item["category"]
-    model_output = model.get_logits_from_text(
-        user_input=prompt, model_output="(", system_prompt=system_prompt
+    question: str = item["question"]
+    choices = item["choices"]
+    answer = item["answer"]
+    model_output = model.generate_text(
+        user_input=question, system_prompt=system_prompt, max_new_tokens=500
     )
-    a_prob, b_prob = get_a_b_probs(model_output, a_token_id, b_token_id)
     return {
-        "question": prompt,
-        "correct": correct,
-        "incorrect": incorrect,
-        "a_prob": a_prob,
-        "b_prob": b_prob,
-        "category": category,
+        "question": question,
+        "choices": choices,
+        "answer": answer,
+        "model_output": model_output,
     }
 
 
@@ -99,9 +98,7 @@ def test_steering(
     layers: List[int], multipliers: List[int], settings: SteeringSettings, overwrite=False
 ):
     """
-    layers: List of layers to test steering on.
-    multipliers: List of multipliers to test steering with.
-    settings: SteeringSettings object.
+    Test steering on a given behavior
     """
     save_results_dir = get_results_dir(settings.behavior)
     if not os.path.exists(save_results_dir):
@@ -118,11 +115,11 @@ def test_steering(
         "truthful_qa": get_truthful_qa_data(),
         "mmlu": get_mmlu_data(),
     }
-    model = LlamaWrapper(
-        HUGGINGFACE_TOKEN,
-        size=settings.model_size,
-        use_chat=not settings.use_base_model,
-        override_model_weights_path=settings.override_model_weights_path,
+    model = ModelWrapper(
+        HUGGINGFACE_TOKEN, 
+        model_name=settings.model_name,
+        size=settings.model_size, 
+        use_chat=not settings.use_base_model
     )
     a_token_id = model.tokenizer.convert_tokens_to_ids("A")
     b_token_id = model.tokenizer.convert_tokens_to_ids("B")
@@ -173,44 +170,35 @@ def test_steering(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--layers", nargs="+", type=int, required=True)
-    parser.add_argument("--multipliers", nargs="+", type=float, required=True)
+    parser.add_argument("--behaviors", nargs="+", type=str, default=ALL_BEHAVIORS)
+    parser.add_argument("--layers", nargs="+", type=int, default=[10])
     parser.add_argument(
-        "--behaviors",
-        type=str,
-        nargs="+",
-        default=ALL_BEHAVIORS
+        "--multipliers", nargs="+", type=float, default=[0.1, 0.5, 1, 2, 5, 10]
     )
     parser.add_argument(
-        "--type",
-        type=str,
-        required=True,
-        choices=["ab", "open_ended", "truthful_qa", "mmlu"],
+        "--type", type=str, choices=["ab", "open_ended", "tqa", "mmlu"], default="ab"
     )
-    parser.add_argument("--system_prompt", type=str, default=None, choices=["pos", "neg"], required=False)
-    parser.add_argument("--override_vector", type=int, default=None)
-    parser.add_argument("--override_vector_model", type=str, default=None)
     parser.add_argument("--use_base_model", action="store_true", default=False)
-    parser.add_argument("--model_size", type=str, choices=["7b", "13b"], default="7b")
-    parser.add_argument("--override_model_weights_path", type=str, default=None)
+    parser.add_argument("--model_name", type=str, default="llama2", 
+                        help="Model name (e.g., llama2, llama3, gemma, mistral, mixtral)")
+    parser.add_argument("--model_size", type=str, default="7b",
+                        help="Model size (e.g., 7b, 13b, 8b, 2b, 8x7b)")
     parser.add_argument("--overwrite", action="store_true", default=False)
-    
+    parser.add_argument("--normalized", action="store_true", default=False)
+    parser.add_argument("--system_prompt", type=str, default=None)
+    parser.add_argument("--use_pos_system_prompt", action="store_true", default=False)
+    parser.add_argument("--use_neg_system_prompt", action="store_true", default=False)
+
     args = parser.parse_args()
-
-    steering_settings = SteeringSettings()
-    steering_settings.type = args.type
-    steering_settings.system_prompt = args.system_prompt
-    steering_settings.override_vector = args.override_vector
-    steering_settings.override_vector_model = args.override_vector_model
-    steering_settings.use_base_model = args.use_base_model
-    steering_settings.model_size = args.model_size
-    steering_settings.override_model_weights_path = args.override_model_weights_path
-
-    for behavior in args.behaviors:
-        steering_settings.behavior = behavior
-        test_steering(
-            layers=args.layers,
-            multipliers=args.multipliers,
-            settings=steering_settings,
-            overwrite=args.overwrite,
-        )
+    settings = SteeringSettings(
+        behaviors=args.behaviors,
+        type=args.type,
+        use_base_model=args.use_base_model,
+        model_name=args.model_name,
+        model_size=args.model_size,
+        normalized=args.normalized,
+        system_prompt=args.system_prompt,
+        use_pos_system_prompt=args.use_pos_system_prompt,
+        use_neg_system_prompt=args.use_neg_system_prompt,
+    )
+    test_steering(args.layers, args.multipliers, settings, args.overwrite)

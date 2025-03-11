@@ -484,7 +484,9 @@ def steering_settings_from_args(args, behavior: str) -> SteeringSettings:
     steering_settings.override_vector = args.override_vector
     steering_settings.override_vector_model = args.override_vector_model
     steering_settings.use_base_model = args.use_base_model
+    steering_settings.model_name = args.model_name
     steering_settings.model_size = args.model_size
+    steering_settings.normalized = args.normalized
     if len(args.override_weights) > 0:
         steering_settings.override_model_weights_path = args.override_weights[0]
     return steering_settings
@@ -504,12 +506,16 @@ if __name__ == "__main__":
         "--type",
         type=str,
         default="ab",
-        choices=["ab", "open_ended", "truthful_qa", "mmlu"],
+        choices=["ab", "open_ended", "tqa", "mmlu"],
     )
     parser.add_argument("--override_vector", type=int, default=None)
     parser.add_argument("--override_vector_model", type=str, default=None)
     parser.add_argument("--use_base_model", action="store_true", default=False)
-    parser.add_argument("--model_size", type=str, choices=["7b", "13b"], default="7b")
+    parser.add_argument("--model_name", type=str, default="llama2", 
+                        help="Model name (e.g., llama2, llama3, gemma, mistral, mixtral)")
+    parser.add_argument("--model_size", type=str, default="7b",
+                        help="Model size (e.g., 7b, 13b, 8b, 2b, 8x7b)")
+    parser.add_argument("--normalized", action="store_true", default=False)
     parser.add_argument("--override_weights", type=str, nargs="+", default=[])
     
     args = parser.parse_args()
@@ -523,7 +529,7 @@ if __name__ == "__main__":
     if steering_settings.type == "ab":
         plot_layer_sweeps(args.layers, args.behaviors, steering_settings, args.title)
 
-    if len(args.layers) == 1 and steering_settings.type != "truthful_qa":
+    if len(args.layers) == 1 and steering_settings.type not in ["tqa", "mmlu"]:
         plot_effect_on_behaviors(args.layers[0], args.multipliers, args.behaviors, steering_settings, args.title)
 
     for behavior in args.behaviors:
@@ -538,6 +544,6 @@ if __name__ == "__main__":
         elif steering_settings.type == "open_ended":
             for layer in args.layers:
                 plot_open_ended_results(layer, args.multipliers, steering_settings)
-        elif steering_settings.type == "truthful_qa" or steering_settings.type == "mmlu":
+        elif steering_settings.type in ["tqa", "mmlu"]:
             for layer in args.layers:
                 plot_tqa_mmlu_results_for_layer(layer, args.multipliers, steering_settings)

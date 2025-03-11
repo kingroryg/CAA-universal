@@ -3,6 +3,9 @@ Generates steering vectors for each layer of the model by averaging the activati
 
 Example usage:
 python generate_vectors.py --layers $(seq 0 31) --save_activations --use_base_model --model_size 7b --behaviors sycophancy
+
+For newer models:
+python generate_vectors.py --layers $(seq 0 31) --save_activations --model_name llama3 --model_size 8b --behaviors sycophancy
 """
 
 import json
@@ -12,10 +15,10 @@ from transformers import AutoTokenizer
 from tqdm import tqdm
 import os
 from dotenv import load_dotenv
-from llama_wrapper import LlamaWrapper
+from llama_wrapper import ModelWrapper
 import argparse
 from typing import List
-from utils.tokenize import tokenize_llama_base, tokenize_llama_chat
+from utils.tokenize import get_tokenizer_for_model
 from behaviors import (
     get_vector_dir,
     get_activations_dir,
@@ -39,20 +42,14 @@ class ComparisonDataset(Dataset):
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.use_chat = use_chat
+        self.tokenize_fn, _ = get_tokenizer_for_model(model_name_path)
 
     def prompt_to_tokens(self, instruction, model_output):
-        if self.use_chat:
-            tokens = tokenize_llama_chat(
-                self.tokenizer,
-                user_input=instruction,
-                model_output=model_output,
-            )
-        else:
-            tokens = tokenize_llama_base(
-                self.tokenizer,
-                user_input=instruction,
-                model_output=model_output,
-            )
+        tokens = self.tokenize_fn(
+            self.tokenizer,
+            user_input=instruction,
+            model_output=model_output,
+        )
         return t.tensor(tokens).unsqueeze(0)
 
     def __len__(self):
@@ -71,7 +68,7 @@ def generate_save_vectors_for_behavior(
     layers: List[int],
     save_activations: bool,
     behavior: List[str],
-    model: LlamaWrapper,
+    model: ModelWrapper,
 ):
     data_path = get_ab_data_path(behavior)
     if not os.path.exists(get_vector_dir(behavior)):
@@ -130,6 +127,7 @@ def generate_save_vectors(
     layers: List[int],
     save_activations: bool,
     use_base_model: bool,
+    model_name: str,
     model_size: str,
     behaviors: List[str],
 ):
@@ -137,11 +135,15 @@ def generate_save_vectors(
     layers: list of layers to generate vectors for
     save_activations: if True, save the activations for each layer
     use_base_model: Whether to use the base model instead of the chat model
-    model_size: size of the model to use, either "7b" or "13b"
+    model_name: name of the model to use (e.g., "llama2", "llama3", "gemma")
+    model_size: size of the model to use (e.g., "7b", "13b", "8b")
     behaviors: behaviors to generate vectors for
     """
-    model = LlamaWrapper(
-        HUGGINGFACE_TOKEN, size=model_size, use_chat=not use_base_model
+    model = ModelWrapper(
+        HUGGINGFACE_TOKEN, 
+        model_name=model_name,
+        size=model_size, 
+        use_chat=not use_base_model
     )
     for behavior in behaviors:
         generate_save_vectors_for_behavior(
@@ -154,7 +156,10 @@ if __name__ == "__main__":
     parser.add_argument("--layers", nargs="+", type=int, default=list(range(32)))
     parser.add_argument("--save_activations", action="store_true", default=False)
     parser.add_argument("--use_base_model", action="store_true", default=False)
-    parser.add_argument("--model_size", type=str, choices=["7b", "13b"], default="7b")
+    parser.add_argument("--model_name", type=str, default="llama2", 
+                        help="Model name (e.g., llama2, llama3, gemma, mistral, mixtral)")
+    parser.add_argument("--model_size", type=str, default="7b",
+                        help="Model size (e.g., 7b, 13b, 8b, 2b, 8x7b)")
     parser.add_argument("--behaviors", nargs="+", type=str, default=ALL_BEHAVIORS)
 
     args = parser.parse_args()
@@ -162,6 +167,7 @@ if __name__ == "__main__":
         args.layers,
         args.save_activations,
         args.use_base_model,
+        args.model_name,
         args.model_size,
         args.behaviors
     )

@@ -2,14 +2,15 @@ import torch as t
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from matplotlib import pyplot as plt
 from matplotlib.ticker import ScalarFormatter
-from utils.helpers import add_vector_from_position, find_instruction_end_postion, get_model_path
+from utils.helpers import add_vector_from_position, find_instruction_end_postion, get_model_path, model_name_format
 from utils.tokenize import (
     tokenize_llama_chat,
     tokenize_llama_base,
     ADD_FROM_POS_BASE,
     ADD_FROM_POS_CHAT,
+    get_tokenizer_for_model,
 )
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
 
 
 class AttnWrapper(t.nn.Module):
@@ -110,99 +111,178 @@ class BlockOutputWrapper(t.nn.Module):
         self.dot_products = []
 
 
-class LlamaWrapper:
+class ModelWrapper:
     def __init__(
         self,
         hf_token: str,
+        model_name: str = "llama2",
         size: str = "7b",
         use_chat: bool = True,
         override_model_weights_path: Optional[str] = None,
     ):
         self.device = "cuda" if t.cuda.is_available() else "cpu"
         self.use_chat = use_chat
-        self.model_name_path = get_model_path(size, not use_chat)
+        self.model_name = model_name
+        self.model_size = size
+        
+        # Get the model path and tokenization function
+        self.model_name_path = get_model_path(model_name, size, not use_chat)
+        self.tokenize_fn, self.end_str_marker = get_tokenizer_for_model(self.model_name_path)
+        
+        # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name_path, token=hf_token
         )
+        
+        # Set padding token if not set
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Load model
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name_path, token=hf_token
         )
+        
+        # Load custom weights if provided
         if override_model_weights_path is not None:
             self.model.load_state_dict(t.load(override_model_weights_path))
-        if size != "7b":
+        
+        # Convert to half precision for larger models to save memory
+        if size not in ["7b", "2b", "8b"]:
             self.model = self.model.half()
+        
         self.model = self.model.to(self.device)
-        if use_chat:
-            self.END_STR = t.tensor(self.tokenizer.encode(ADD_FROM_POS_CHAT)[1:]).to(
-                self.device
-            )
+        
+        # Set up end string marker for finding instruction end position
+        self.END_STR = t.tensor(self.tokenizer.encode(self.end_str_marker)[1:]).to(
+            self.device
+        )
+        
+        # Wrap model layers to capture activations
+        self._wrap_model_layers()
+
+    def _wrap_model_layers(self):
+        """Wrap model layers to capture activations"""
+        # Different models have different layer structures
+        # We need to identify the correct attribute names
+        
+        # Identify model architecture and layer structure
+        model_config = self.model.config
+        
+        # Get the main model component (transformer)
+        if hasattr(self.model, "model"):
+            transformer = self.model.model
         else:
-            self.END_STR = t.tensor(self.tokenizer.encode(ADD_FROM_POS_BASE)[1:]).to(
-                self.device
-            )
-        for i, layer in enumerate(self.model.model.layers):
-            self.model.model.layers[i] = BlockOutputWrapper(
-                layer, self.model.lm_head, self.model.model.norm, self.tokenizer
+            transformer = self.model
+        
+        # Find the layers attribute
+        layers_attr = None
+        for attr in ["layers", "h", "decoder.layers", "transformer.h"]:
+            if hasattr(transformer, attr.split('.')[0]):
+                current = transformer
+                for part in attr.split('.'):
+                    if hasattr(current, part):
+                        current = getattr(current, part)
+                        layers_attr = attr
+                    else:
+                        break
+                if layers_attr:
+                    break
+        
+        if not layers_attr:
+            raise ValueError(f"Could not find layers in model {self.model_name_path}")
+        
+        # Find the normalization layer
+        norm = None
+        for attr in ["norm", "ln_f", "final_layer_norm"]:
+            if hasattr(transformer, attr):
+                norm = getattr(transformer, attr)
+                break
+        
+        if norm is None:
+            raise ValueError(f"Could not find normalization layer in model {self.model_name_path}")
+        
+        # Get the embedding/unembedding matrix
+        if hasattr(self.model, "lm_head"):
+            unembed_matrix = self.model.lm_head
+        else:
+            # For models where lm_head is tied to input embeddings
+            unembed_matrix = self.model.get_input_embeddings()
+        
+        # Wrap each layer
+        layers = current  # current points to the layers after the loop above
+        for i in range(len(layers)):
+            layer = layers[i]
+            layers[i] = BlockOutputWrapper(
+                layer, unembed_matrix, norm, self.tokenizer
             )
 
     def set_save_internal_decodings(self, value: bool):
-        for layer in self.model.model.layers:
+        for layer in self._get_layers():
             layer.save_internal_decodings = value
 
+    def _get_layers(self):
+        """Get the model layers regardless of architecture"""
+        if hasattr(self.model, "model"):
+            transformer = self.model.model
+        else:
+            transformer = self.model
+            
+        # Find the layers attribute
+        for attr in ["layers", "h", "decoder.layers", "transformer.h"]:
+            if hasattr(transformer, attr.split('.')[0]):
+                current = transformer
+                for part in attr.split('.'):
+                    if hasattr(current, part):
+                        current = getattr(current, part)
+                    else:
+                        break
+                return current
+        
+        raise ValueError(f"Could not find layers in model {self.model_name_path}")
+
     def set_from_positions(self, pos: int):
-        for layer in self.model.model.layers:
-            layer.from_position = pos
+        self.from_pos = pos
 
     def generate(self, tokens, max_new_tokens=100):
-        with t.no_grad():
-            instr_pos = find_instruction_end_postion(tokens[0], self.END_STR)
-            self.set_from_positions(instr_pos)
-            generated = self.model.generate(
-                inputs=tokens, max_new_tokens=max_new_tokens, top_k=1
-            )
-            return self.tokenizer.batch_decode(generated)[0]
+        return self.model.generate(
+            tokens, max_new_tokens=max_new_tokens, do_sample=False
+        )
 
     def generate_text(self, user_input: str, model_output: Optional[str] = None, system_prompt: Optional[str] = None, max_new_tokens: int = 50) -> str:
-        if self.use_chat:
-            tokens = tokenize_llama_chat(
-                tokenizer=self.tokenizer, user_input=user_input, model_output=model_output, system_prompt=system_prompt
-            )
-        else:
-            tokens = tokenize_llama_base(tokenizer=self.tokenizer, user_input=user_input, model_output=model_output)
+        tokens = self.tokenize_fn(
+            self.tokenizer, user_input, model_output, system_prompt
+        )
         tokens = t.tensor(tokens).unsqueeze(0).to(self.device)
-        return self.generate(tokens, max_new_tokens=max_new_tokens)
+        output = self.generate(tokens, max_new_tokens=max_new_tokens)
+        return self.tokenizer.decode(output[0], skip_special_tokens=True)
 
     def get_logits(self, tokens):
         with t.no_grad():
-            instr_pos = find_instruction_end_postion(tokens[0], self.END_STR)
-            self.set_from_positions(instr_pos)
             logits = self.model(tokens).logits
-            return logits
+        return logits
 
     def get_logits_from_text(self, user_input: str, model_output: Optional[str] = None, system_prompt: Optional[str] = None) -> t.Tensor:
-        if self.use_chat:
-            tokens = tokenize_llama_chat(
-                tokenizer=self.tokenizer, user_input=user_input, model_output=model_output, system_prompt=system_prompt
-            )
-        else:
-            tokens = tokenize_llama_base(tokenizer=self.tokenizer, user_input=user_input, model_output=model_output)
+        tokens = self.tokenize_fn(
+            self.tokenizer, user_input, model_output, system_prompt
+        )
         tokens = t.tensor(tokens).unsqueeze(0).to(self.device)
         return self.get_logits(tokens)
 
     def get_last_activations(self, layer):
-        return self.model.model.layers[layer].activations
+        return self._get_layers()[layer].block.self_attn.activations
 
     def set_add_activations(self, layer, activations):
-        self.model.model.layers[layer].add(activations)
+        self._get_layers()[layer].add(activations)
 
     def set_calc_dot_product_with(self, layer, vector):
-        self.model.model.layers[layer].calc_dot_product_with = vector
+        self._get_layers()[layer].calc_dot_product_with = vector
 
     def get_dot_products(self, layer):
-        return self.model.model.layers[layer].dot_products
+        return self._get_layers()[layer].dot_products
 
     def reset_all(self):
-        for layer in self.model.model.layers:
+        for layer in self._get_layers():
             layer.reset()
 
     def print_decoded_activations(self, decoded_activations, label, topk=10):
@@ -220,7 +300,7 @@ class LlamaWrapper:
     ):
         tokens = tokens.to(self.device)
         self.get_logits(tokens)
-        for i, layer in enumerate(self.model.model.layers):
+        for i, layer in enumerate(self._get_layers()):
             print(f"Layer {i}: Decoded intermediate outputs")
             if print_attn_mech:
                 self.print_decoded_activations(
@@ -244,7 +324,7 @@ class LlamaWrapper:
     def plot_decoded_activations_for_layer(self, layer_number, tokens, topk=10):
         tokens = tokens.to(self.device)
         self.get_logits(tokens)
-        layer = self.model.model.layers[layer_number]
+        layer = self._get_layers()[layer_number]
 
         data = {}
         data["Attention mechanism"] = self.get_activation_data(
@@ -282,3 +362,7 @@ class LlamaWrapper:
         probs_percent = [int(v * 100) for v in values.tolist()]
         tokens = self.tokenizer.batch_decode(indices.unsqueeze(-1))
         return list(zip(tokens, probs_percent)), list(zip(tokens, values.tolist()))
+
+
+# For backward compatibility
+LlamaWrapper = ModelWrapper

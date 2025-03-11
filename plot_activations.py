@@ -3,6 +3,9 @@ Script to plot PCA of constrastive activations
 
 Usage:
 python plot_activations.py --behaviors sycophancy --layers 9 10 11 --use_base_model --model_size 7b
+
+For newer models:
+python plot_activations.py --behaviors sycophancy --layers 9 10 11 --model_name llama3 --model_size 8b
 """
 
 import json
@@ -27,13 +30,17 @@ def save_activation_projection_pca(behavior: str, layer: int, model_name_path: s
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
+    # Check if activations exist
+    pos_path = get_activations_path(behavior, layer, model_name_path, "pos")
+    neg_path = get_activations_path(behavior, layer, model_name_path, "neg")
+    
+    if not os.path.exists(pos_path) or not os.path.exists(neg_path):
+        print(f"Warning: Activations not found for {behavior}, layer {layer}, model {model_name_path}")
+        return
+
     # Loading activations
-    activations_pos = t.load(
-        get_activations_path(behavior, layer, model_name_path, "pos")
-    )
-    activations_neg = t.load(
-        get_activations_path(behavior, layer, model_name_path, "neg")
-    )
+    activations_pos = t.load(pos_path)
+    activations_neg = t.load(neg_path)
 
     # Getting letters
     with open(get_ab_data_path(behavior), "r") as f:
@@ -129,10 +136,12 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument("--use_base_model", action="store_true", default=False)
-    parser.add_argument("--model_size", type=str, choices=["7b", "13b"], default="7b")
+    parser.add_argument("--model_name", type=str, default="llama2", 
+                        help="Model name (e.g., llama2, llama3, gemma, mistral, mixtral)")
+    parser.add_argument("--model_size", type=str, default="7b",
+                        help="Model size (e.g., 7b, 13b, 8b, 2b, 8x7b)")
     args = parser.parse_args()
-    model_name_path = get_model_path(args.model_size, args.use_base_model)
-    args = parser.parse_args()
+    model_name_path = get_model_path(args.model_name, args.model_size, args.use_base_model)
     for behavior in args.behaviors:
         print(f"plotting {behavior} activations PCA")
         for layer in tqdm(args.layers):

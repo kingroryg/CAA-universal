@@ -1,5 +1,7 @@
 # Steering Llama 2 with Contrastive Activation Addition
 
+This project has been extended to support multiple language models beyond Llama 2, including Llama 3, Gemma, Mistral, and Mixtral.
+
 ## Setup
 
 ```bash
@@ -11,8 +13,48 @@ pip install -r requirements.txt
 Then create a `.env` file with the following variables (see `.env.example`):
 
 ```
-HF_TOKEN=huggingface_token_with_access_to_llama2
+HF_TOKEN=huggingface_token_with_access_to_models
 OPEN_AI_KEY=openai_api_key_with_access_to_gpt4
+```
+
+## Supported Models
+
+The project now supports the following models:
+- Llama 2 (7B, 13B, 70B) - base and chat variants
+- Llama 3 (8B, 70B) - base and instruct variants
+- Gemma (2B, 7B) - base and instruct variants
+- Mistral (7B) - base and instruct variants
+- Mixtral (8x7B) - base and instruct variants
+
+You can also use any other model from Huggingface by providing the full model path.
+
+## Usage Examples
+
+### Generate Vectors
+
+For Llama 2 (original):
+```bash
+python generate_vectors.py --layers $(seq 0 31) --save_activations --use_base_model --model_name llama2 --model_size 7b --behaviors sycophancy
+```
+
+For Llama 3:
+```bash
+python generate_vectors.py --layers $(seq 0 31) --save_activations --model_name llama3 --model_size 8b --behaviors sycophancy
+```
+
+For Gemma:
+```bash
+python generate_vectors.py --layers $(seq 0 31) --save_activations --model_name gemma --model_size 7b --behaviors sycophancy
+```
+
+For Mistral:
+```bash
+python generate_vectors.py --layers $(seq 0 31) --save_activations --model_name mistral --model_size 7b --behaviors sycophancy
+```
+
+For custom models from Huggingface:
+```bash
+python generate_vectors.py --layers $(seq 0 31) --save_activations --model_name "organization/model-name" --behaviors sycophancy
 ```
 
 ## Datasets
@@ -96,27 +138,30 @@ For each behavior, we can evaluate the model on the following test sets:
 
 ```bash
 # Generate steering vectors for layers of the model for a certain behavior
-python generate_vectors.py --layers $(seq 0 31) --save_activations --model_size "7b" --behaviors sycophancy
+python generate_vectors.py --layers $(seq 0 31) --save_activations --model_name llama2 --model_size "7b" --behaviors sycophancy
+
+# For newer models
+python generate_vectors.py --layers $(seq 0 31) --save_activations --model_name llama3 --model_size "8b" --behaviors sycophancy
 
 # Normalize steering vectors per layer to have the same norm
-python normalize_vectors.py
+python normalize_vectors.py --model_name llama2 --model_size "7b"
 
 # Evaluate model on A/B, open-ended or TruthfulQA test sets while using CAA
-python prompting_with_steering.py --behaviors sycophancy --layers $(seq 0 31) --multipliers -1 0 1 --type ab --model_size "7b"
-python prompting_with_steering.py --behaviors sycophancy --layers 13 --multipliers -2 -1.5 -1 -0.5 0 0.5 1 1.5 2 --type ab --model_size "7b" --system_prompt pos
+python prompting_with_steering.py --behaviors sycophancy --layers $(seq 0 31) --multipliers -1 0 1 --type ab --model_name llama2 --model_size "7b"
+python prompting_with_steering.py --behaviors sycophancy --layers 13 --multipliers -2 -1.5 -1 -0.5 0 0.5 1 1.5 2 --type ab --model_name llama3 --model_size "8b" --system_prompt pos
 
 # Plot PCA of constrastive activations
-python plot_activations.py --behaviors sycophancy --layers $(seq 0 31) --model_size "7b"
+python plot_activations.py --behaviors sycophancy --layers $(seq 0 31) --model_name llama2 --model_size "7b"
 
 # Plot results of CAA steering effect
-python plot_results.py --layers $(seq 0 31) --multipliers 1 --type ab
-python plot_results.py --layers $(seq 0 31) --multipliers -1 0 1 --behaviors sycophancy --type ab
+python plot_results.py --layers $(seq 0 31) --multipliers 1 --type ab --model_name llama2 --model_size "7b"
+python plot_results.py --layers $(seq 0 31) --multipliers -1 0 1 --behaviors sycophancy --type ab --model_name llama3 --model_size "8b"
 
 # Finetune a llama on a behavioral dataset using supervised finetuning on the A/B tokens
 python finetune_llama.py --behavior sycophancy --direction pos
 
 # Plot similarites of steering vectors
-python analyze_vectors.py
+python analyze_vectors.py --model_name llama2 --model_size "7b"
 
 # Use GPT-4 to score open-ended responses
 python scoring.py
